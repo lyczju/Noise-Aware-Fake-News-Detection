@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 from torch_geometric.nn import GATConv, global_mean_pool
+from torch_geometric.utils import to_dense_adj
 
 class GIBModel(torch.nn.Module):
     def __init__(self):
@@ -12,22 +13,77 @@ class GIBModel(torch.nn.Module):
         self.n_hidden = 128
         self.n_classes = 2
         self.n_heads = 4
-        self.conv = GATConv(self.n_features, self.n_hidden, heads=self.n_heads, dropout=0.2)
-        self.fc = nn.Linear(self.n_hidden * self.n_heads, self.n_classes)
+        self.conv1 = GATConv(self.n_features, self.n_hidden, heads=self.n_heads, dropout=0.2)
+        self.conv2 = GATConv(self.n_hidden * self.n_heads, self.n_hidden, dropout=0.2)
+        self.subgraph_clf_layer = nn.Linear(self.n_hidden, 2)
+        self.fc1 = nn.Linear(self.n_hidden, self.n_hidden)
+        self.fc2 = nn.Linear(self.n_hidden, self.n_classes)
+        self.mse_loss = nn.MSELoss()
 
     def forward(self, graph_data):
-        output = F.relu(self.conv(graph_data.x, graph_data.edge_index))
+        # TODO: sampling process and loss
+        x, edge_index, batch = graph_data.x, graph_data.edge_index, graph_data.batch
+        x = F.relu(self.conv1(x, edge_index))
+        x = F.relu(self.conv2(x, edge_index))
         
-        relation_matrix = self.construct_relation_matrix(output)
-        ib_loss = self.calculate_ib_loss(relation_matrix)
-        node_mask = self.create_diagonal_mask(output)
-        output = node_mask @ output
+        subgraph_clf = F.softmax(self.subgraph_clf_layer(x), dim=1)
         
-        output = F.relu(global_mean_pool(output, graph_data.batch))
-        output = F.dropout(output, p=0.2, training=self.training)
-        output = self.fc(output)
-        # y = torch.sigmoid(output)
-        return output, ib_loss
+        feature_embeddings, aggregated_embeddings, aggregate_loss = self.aggregate(x, edge_index, batch, subgraph_clf)
+        output = F.relu(self.fc1(aggregated_embeddings))
+        output = F.dropout(output, p=0.3, training=self.training)
+        output = self.fc2(output)
+        return output, aggregate_loss
+        
+        # relation_matrix = self.construct_relation_matrix(output)
+        # ib_loss = self.calculate_ib_loss(relation_matrix)
+        # node_mask = self.create_diagonal_mask(output)
+        # output = node_mask @ output
+        
+        # output = F.relu(global_mean_pool(output, batch))
+        # output = F.dropout(output, p=0.2, training=self.training)
+        # output = self.fc(output)
+        # # y = torch.sigmoid(output)
+        # return output, ib_loss
+    
+    def aggregate(self, x, edge_index, batch, subgraph_clf):
+        if torch.cuda.is_available():
+            ones = torch.ones(2).cuda()
+        else:
+            ones = torch.ones(2)
+        
+        feature_embeddings = []
+        aggregated_embeddings = []
+        total_loss = 0
+        
+        dense_adj = to_dense_adj(edge_index)[0]
+        
+        graph_ids = torch.unique(batch)
+        
+        for graph_idx in graph_ids:
+            mask = (batch == graph_idx)
+            
+            graph_x = x[mask]
+            graph_adj = dense_adj[mask][:, mask]
+            graph_subgraph_clf = subgraph_clf[mask]
+            
+            aggregated_adj = graph_subgraph_clf.t() @ graph_adj @ graph_subgraph_clf
+            normalized_adj = F.normalize(aggregated_adj, p=1, dim=1, eps=1e-5)
+            
+            loss = self.mse_loss(normalized_adj.diagonal(), ones)
+            total_loss += loss
+            
+            feature_embedding = torch.mean(graph_x, dim=0, keepdim=True)
+            feature_embeddings.append(feature_embedding)
+            
+            aggregated_features = graph_subgraph_clf.t() @ graph_x
+            aggregated_embedding = aggregated_features[0].unsqueeze(0)
+            aggregated_embeddings.append(aggregated_embedding)
+            
+        feature_embeddings = torch.cat(feature_embeddings, dim=0)
+        aggregated_embeddings = torch.cat(aggregated_embeddings, dim=0)
+        total_loss = total_loss / len(graph_ids)
+        
+        return feature_embeddings, aggregated_embeddings, total_loss
     
     @staticmethod
     def construct_relation_matrix(node_features):

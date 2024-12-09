@@ -126,9 +126,9 @@ def training_function(config, args):
     # )
     
     path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'UPFD')
-    train_dataset = UPFD(path, args.dataset, args.feature, 'train', ToUndirected())
-    val_dataset = UPFD(path, args.dataset, args.feature, 'val', ToUndirected())
-    test_dataset = UPFD(path, args.dataset, args.feature, 'test', ToUndirected())
+    val_dataset = UPFD(path, args.dataset, args.feature, 'train', ToUndirected())
+    test_dataset = UPFD(path, args.dataset, args.feature, 'val', ToUndirected())
+    train_dataset = UPFD(path, args.dataset, args.feature, 'test', ToUndirected())
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=EVAL_BATCH_SIZE, shuffle=False)
