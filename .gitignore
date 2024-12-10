@@ -1,4 +1,4 @@
 data/
 test.py
 data_loader_PSGT.py
-models/__pycache__/
+__pycache__/
