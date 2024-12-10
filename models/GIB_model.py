@@ -28,8 +28,8 @@ class GIBModel(torch.nn.Module):
         
         subgraph_clf = F.softmax(self.subgraph_clf_layer(x), dim=1)
         
-        feature_embeddings, aggregated_embeddings, aggregate_loss = self.aggregate(x, edge_index, batch, subgraph_clf)
-        output = F.relu(self.fc1(aggregated_embeddings))
+        graph_embeddings, subgraph_embeddings, aggregate_loss = self.aggregate(x, edge_index, batch, subgraph_clf)
+        output = F.relu(self.fc1(subgraph_embeddings))
         output = F.dropout(output, p=0.3, training=self.training)
         output = self.fc2(output)
         return output, aggregate_loss
@@ -51,8 +51,8 @@ class GIBModel(torch.nn.Module):
         else:
             ones = torch.ones(2)
         
-        feature_embeddings = []
-        aggregated_embeddings = []
+        graph_embeddings = []
+        subgraph_embeddings = []
         total_loss = 0
         
         dense_adj = to_dense_adj(edge_index)[0]
@@ -72,18 +72,18 @@ class GIBModel(torch.nn.Module):
             loss = self.mse_loss(normalized_adj.diagonal(), ones)
             total_loss += loss
             
-            feature_embedding = torch.mean(graph_x, dim=0, keepdim=True)
-            feature_embeddings.append(feature_embedding)
+            graph_embedding = torch.mean(graph_x, dim=0, keepdim=True)
+            graph_embeddings.append(graph_embedding)
             
-            aggregated_features = graph_subgraph_clf.t() @ graph_x
-            aggregated_embedding = aggregated_features[0].unsqueeze(0)
-            aggregated_embeddings.append(aggregated_embedding)
+            aggregated_embeddings = graph_subgraph_clf.t() @ graph_x
+            subgraph_embedding = aggregated_embeddings[0].unsqueeze(0)
+            subgraph_embeddings.append(subgraph_embedding)
             
-        feature_embeddings = torch.cat(feature_embeddings, dim=0)
-        aggregated_embeddings = torch.cat(aggregated_embeddings, dim=0)
+        graph_embeddings = torch.cat(graph_embeddings, dim=0)
+        subgraph_embeddings = torch.cat(subgraph_embeddings, dim=0)
         total_loss = total_loss / len(graph_ids)
         
-        return feature_embeddings, aggregated_embeddings, total_loss
+        return graph_embeddings, subgraph_embeddings, total_loss
     
     @staticmethod
     def construct_relation_matrix(node_features):

@@ -13,7 +13,6 @@
 # limitations under the License.
 import argparse
 import os
-import os.path as osp
 import pickle
 from tqdm import tqdm
 # import logging
@@ -125,7 +124,7 @@ def training_function(config, args):
     #     test_dataset, shuffle=False, batch_size=EVAL_BATCH_SIZE
     # )
     
-    path = osp.join(osp.dirname(osp.realpath(__file__)), '..', 'data', 'UPFD')
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', 'data', 'UPFD')
     val_dataset = UPFD(path, args.dataset, args.feature, 'train', ToUndirected())
     test_dataset = UPFD(path, args.dataset, args.feature, 'val', ToUndirected())
     train_dataset = UPFD(path, args.dataset, args.feature, 'test', ToUndirected())
