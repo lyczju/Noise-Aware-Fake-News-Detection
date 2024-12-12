@@ -16,34 +16,30 @@ class GIBModel(torch.nn.Module):
         self.conv1 = GATConv(self.n_features, self.n_hidden, heads=self.n_heads, dropout=0.2)
         self.conv2 = GATConv(self.n_hidden * self.n_heads, self.n_hidden, dropout=0.2)
         self.subgraph_clf_layer = nn.Linear(self.n_hidden, 2)
+        self.subgraph_detect_layer = nn.Linear(self.n_hidden, 2)    # mask select
         self.fc1 = nn.Linear(self.n_hidden, self.n_hidden)
         self.fc2 = nn.Linear(self.n_hidden, self.n_classes)
         self.mse_loss = nn.MSELoss()
 
     def forward(self, graph_data):
         # TODO: sampling process and loss
-        x, edge_index, batch = graph_data.x, graph_data.edge_index, graph_data.batch
-        x = F.relu(self.conv1(x, edge_index))
-        x = F.relu(self.conv2(x, edge_index))
+        node_x, edge_index, batch = graph_data.x, graph_data.edge_index, graph_data.batch
+        x = self.gnn(node_x, edge_index)
         
         subgraph_clf = F.softmax(self.subgraph_clf_layer(x), dim=1)
         
         graph_embeddings, subgraph_embeddings, aggregate_loss = self.aggregate(x, edge_index, batch, subgraph_clf)
+
+        # node_sig = self.determine_subgraph(node_x, edge_index, batch)
+        # detect_loss = torch.mean(torch.abs(subgraph_clf[:, 0] - node_sig[:, 0]))
+        detect_loss = 0
+
         output = F.relu(self.fc1(subgraph_embeddings))
         output = F.dropout(output, p=0.3, training=self.training)
         output = self.fc2(output)
-        return output, aggregate_loss
+        return output, aggregate_loss, detect_loss
         
-        # relation_matrix = self.construct_relation_matrix(output)
-        # ib_loss = self.calculate_ib_loss(relation_matrix)
-        # node_mask = self.create_diagonal_mask(output)
-        # output = node_mask @ output
-        
-        # output = F.relu(global_mean_pool(output, batch))
-        # output = F.dropout(output, p=0.2, training=self.training)
-        # output = self.fc(output)
-        # # y = torch.sigmoid(output)
-        # return output, ib_loss
+
     
     def aggregate(self, x, edge_index, batch, subgraph_clf):
         if torch.cuda.is_available():
@@ -85,28 +81,77 @@ class GIBModel(torch.nn.Module):
         
         return graph_embeddings, subgraph_embeddings, total_loss
     
-    @staticmethod
-    def construct_relation_matrix(node_features):
-        node_features_normalized = F.normalize(node_features, p=2, dim=1)
-        relation_matrix = torch.mm(node_features_normalized, node_features_normalized.t())
-        return relation_matrix
+    def determine_subgraph(self, x, edge_index, batch):
+        # return node_sig: node_num * 2, one-hot flag of node significance
+
+        if self.training:
+            node_embeddings = self.aggregate_by_hop(x, edge_index, batch, 2)
+
+            node_sig = F.softmax(self.subgraph_detect_layer(node_embeddings), dim=1)
+
+        else:
+            node_sig = F.softmax(self.subgraph_detect_layer(x), dim=1)
+
+        return node_sig
+        
+    def gnn(self, x, edge_index):
+        x = F.relu(self.conv1(x, edge_index))
+        x = F.relu(self.conv2(x, edge_index))
+        return x
     
-    @staticmethod
-    def calculate_ib_loss(relation_matrix):
-        relation_matrix = F.normalize(relation_matrix, p=2, dim=1)
-        k = torch.mm(relation_matrix, relation_matrix)
-        ib_loss = torch.trace(k) / relation_matrix.size(0) + torch.mean(relation_matrix) ** 2 - 2 * torch.mean(relation_matrix) / relation_matrix.size(0)
-        return ib_loss
-    
-    @staticmethod
-    def create_diagonal_mask(node_features, threshold=0.9):
-        node_importance = torch.norm(node_features, dim=1)
+    def aggregate_by_hop(self, x, edge_index, batch, hop):
+        # aggregate heighbor embeddings based on hop 
+        # return embeddings of each node
+
+        node_embeddings = torch.zeros([x.size(dim=0), self.n_hidden]) 
+        if torch.cuda.is_available():
+            node_embeddings = node_embeddings.cuda()
+        graph_ids = torch.unique(batch)
         
-        mask_matrix = torch.eye(node_features.size(0), device=node_features.device)
-        
-        important_nodes_mask = node_importance > threshold * node_importance.mean()
-        mask_matrix = mask_matrix * important_nodes_mask.float().diag()
-        
-        num_important_nodes = torch.sum(mask_matrix.diagonal())
-        
-        return mask_matrix
+        for graph_idx in graph_ids:
+            mask = (batch == graph_idx)
+            mask_idx = [i for i, x in enumerate(mask) if x == True]
+
+            # build one graph for each node
+            for x_idx in range(len(mask_idx)):
+                node_global_idx = mask_idx[x_idx]
+                neighbor_edges = []
+                subgraph_embeddings = torch.zeros(x.size())
+                if torch.cuda.is_available():
+                    subgraph_embeddings = subgraph_embeddings.cuda()
+                subgraph_embeddings[node_global_idx] = x[node_global_idx]     
+                queue = []
+                queue_hop = []
+
+                edges = edge_index[:, edge_index[0] == node_global_idx].t().tolist()
+                queue.extend(edges)
+                queue_hop.extend([hop] * len(edges))
+
+                while len(queue) > 0:
+                    neighbor_edge = queue.pop(0)
+                    neighbor_edges.append(neighbor_edge)
+                    neighbor_edges.append(neighbor_edge[::-1])
+
+                    _node_global_idx = neighbor_edge[0]
+                    subgraph_embeddings[_node_global_idx] = x[_node_global_idx]
+                    _node_global_idx = neighbor_edge[1]
+                    subgraph_embeddings[_node_global_idx] = x[_node_global_idx] 
+
+                    edge_hop = queue_hop.pop(0) - 1
+
+                    if edge_hop > 0:
+                        _node_global_idx = neighbor_edge[1]
+                        edges = edge_index[:, edge_index[0] == _node_global_idx].t().tolist()
+                        edges = [e for e in edges if e not in neighbor_edges]
+                        queue.extend(edges)
+                        queue_hop.extend([edge_hop] * len(edges))
+
+                neighbor_edges = torch.LongTensor(neighbor_edges).t()
+                if torch.cuda.is_available():
+                    neighbor_edges = neighbor_edges.cuda()
+                
+                
+                x_embedding = self.gnn(subgraph_embeddings, neighbor_edges)
+                node_embeddings[node_global_idx] = x_embedding[node_global_idx]
+
+        return node_embeddings

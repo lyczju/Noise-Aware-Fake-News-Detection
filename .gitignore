@@ -2,3 +2,5 @@ data/
 test.py
 data_loader_PSGT.py
 models/__pycache__/
+utils/__pycache__/
+models/cache/
