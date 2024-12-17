@@ -87,10 +87,12 @@ class GIBModel(torch.nn.Module):
         if self.training:
             node_embeddings = self.aggregate_by_hop(x, edge_index, batch, 2)
 
-            node_sig = F.softmax(self.subgraph_detect_layer(node_embeddings), dim=1)
+            
 
         else:
-            node_sig = F.softmax(self.subgraph_detect_layer(x), dim=1)
+            node_embeddings = self.gnn(x, edge_index)
+
+        node_sig = F.softmax(self.subgraph_detect_layer(node_embeddings), dim=1)
 
         return node_sig
         
