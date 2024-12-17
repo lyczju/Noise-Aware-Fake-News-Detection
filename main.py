@@ -320,8 +320,8 @@ def training_function(config, args):
                 f1_metric.add_batch(predictions=predictions, references=references)
 
             accuracy = accuracy_metric.compute()
-            precision = precision_metric.compute()
-            recall = recall_metric.compute()
+            precision = precision_metric.compute(zero_division=1)
+            recall = recall_metric.compute(zero_division=1)
             f1 = f1_metric.compute()
             # Use accelerator.print to print only on the main process.
             
