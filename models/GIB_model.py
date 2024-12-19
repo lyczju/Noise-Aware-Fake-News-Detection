@@ -20,15 +20,22 @@ class GIBModel(torch.nn.Module):
         self.fc1 = nn.Linear(self.n_hidden, self.n_hidden)
         self.fc2 = nn.Linear(self.n_hidden, self.n_classes)
         self.mse_loss = nn.MSELoss()
+        self.ib_estimator_layer1 = nn.Linear(self.n_hidden * 2, self.n_hidden)
+        self.ib_estimator_layer2 = nn.Linear(self.n_hidden, 1)
+
 
     def forward(self, graph_data):
         # TODO: sampling process and loss
         node_x, edge_index, batch = graph_data.x, graph_data.edge_index, graph_data.batch
         x = self.gnn(node_x, edge_index)
+        if torch.isnan(x[0][0]):
+            print("nan")
         
         subgraph_clf = F.softmax(self.subgraph_clf_layer(x), dim=1)
         
         graph_embeddings, subgraph_embeddings, aggregate_loss = self.aggregate(x, edge_index, batch, subgraph_clf)
+        mi_loss = self.mutual_information_estimation(graph_embeddings, subgraph_embeddings)
+        mi_loss = 0
 
         # node_sig = self.determine_subgraph(node_x, edge_index, batch)
         # detect_loss = torch.mean(torch.abs(subgraph_clf[:, 0] - node_sig[:, 0]))
@@ -37,7 +44,7 @@ class GIBModel(torch.nn.Module):
         output = F.relu(self.fc1(subgraph_embeddings))
         output = F.dropout(output, p=0.3, training=self.training)
         output = self.fc2(output)
-        return output, aggregate_loss, detect_loss
+        return output, aggregate_loss, detect_loss, mi_loss
         
 
     
@@ -86,8 +93,6 @@ class GIBModel(torch.nn.Module):
 
         if self.training:
             node_embeddings = self.aggregate_by_hop(x, edge_index, batch, 2)
-
-            
 
         else:
             node_embeddings = self.gnn(x, edge_index)
@@ -157,3 +162,13 @@ class GIBModel(torch.nn.Module):
                 node_embeddings[node_global_idx] = x_embedding[node_global_idx]
 
         return node_embeddings
+
+
+    def mutual_information_estimation(self, graph_embeddings, subgraph_embeddings):
+        shuffle_embeddings = graph_embeddings[torch.randperm(graph_embeddings.shape[0])]
+        joint_embeddings = torch.cat([graph_embeddings, subgraph_embeddings], dim=-1)
+        margin_embeddings = torch.cat([shuffle_embeddings, subgraph_embeddings], dim=-1)
+        joint = F.relu(self.ib_estimator_layer2(F.relu(self.ib_estimator_layer1(joint_embeddings))))
+        margin = F.relu(self.ib_estimator_layer2(F.relu(self.ib_estimator_layer1(margin_embeddings))))
+        mi_est = torch.mean(joint) - torch.clamp(torch.log(torch.mean(torch.exp(margin))),-100000,100000)
+        return mi_est

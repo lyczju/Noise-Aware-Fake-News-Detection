@@ -129,6 +129,7 @@ def training_function(config, args):
     test_dataset = UPFD(path, args.dataset, args.feature, 'val', ToUndirected())
     train_dataset = UPFD(path, args.dataset, args.feature, 'test', ToUndirected())
 
+    # dataset setting?
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=EVAL_BATCH_SIZE, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=EVAL_BATCH_SIZE, shuffle=False)
@@ -280,10 +281,11 @@ def training_function(config, args):
         for step, batch in enumerate(active_dataloader):
             # We could avoid this line since we set the accelerator with `device_placement=True`.
             batch.to(accelerator.device)
-            output, ib_loss, detect_loss = model(batch)
+            output, aggregate_loss, detect_loss, mi_loss = model(batch)
             criterion = nn.CrossEntropyLoss()
             loss = criterion(output, batch.y)
-            loss += ib_loss + detect_loss
+            loss += aggregate_loss + detect_loss + mi_loss
+            # loss += aggregate_loss + mi_loss
             loss = loss / gradient_accumulation_steps
             # We keep track of the loss at each epoch
             if args.with_tracking:
@@ -305,11 +307,15 @@ def training_function(config, args):
                     
         def evaluate_model(model, dataloader, type):
             model.eval()
+            aggregate_loss_all = 0
+            mi_loss_all = 0
+            detect_loss_all = 0
+            step_count = 0
             for step, batch in enumerate(dataloader):
                 # We could avoid this line since we set the accelerator with `device_placement=True`.
                 batch.to(accelerator.device)
                 with torch.no_grad():
-                    output, ib_loss, detect_loss = model(batch)
+                    output, aggregate_loss, detect_loss, mi_loss = model(batch)
                 predictions = output.argmax(dim=-1)
                 predictions, references = accelerator.gather_for_metrics(
                     (predictions, batch.y)
@@ -318,6 +324,10 @@ def training_function(config, args):
                 precision_metric.add_batch(predictions=predictions, references=references)
                 recall_metric.add_batch(predictions=predictions, references=references)
                 f1_metric.add_batch(predictions=predictions, references=references)
+                aggregate_loss_all += aggregate_loss
+                detect_loss_all += detect_loss
+                mi_loss_all += mi_loss
+                step_count += 1
 
             accuracy = accuracy_metric.compute()
             precision = precision_metric.compute()
@@ -326,6 +336,7 @@ def training_function(config, args):
             # Use accelerator.print to print only on the main process.
             
             accelerator.print(f"{type} set:", f"epoch {epoch}:", f"accuracy: {accuracy}", f"precision: {precision}", f"recall: {recall}", f"f1: {f1}")
+            print(f"aggregate_loss: {aggregate_loss_all / step_count}", f"detect_loss : {detect_loss_all / step_count}", f"mi_loss: {mi_loss_all / step_count}", )
             if args.with_tracking:
                 accelerator.log(
                     {
