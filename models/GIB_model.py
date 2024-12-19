@@ -29,7 +29,7 @@ class GIBModel(torch.nn.Module):
         node_x, edge_index, batch = graph_data.x, graph_data.edge_index, graph_data.batch
         x = self.gnn(node_x, edge_index)
         if torch.isnan(x[0][0]):
-            print("nan")
+            print("nan detected!")
         
         subgraph_clf = F.softmax(self.subgraph_clf_layer(x), dim=1)
         
