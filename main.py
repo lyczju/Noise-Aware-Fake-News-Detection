@@ -284,8 +284,7 @@ def training_function(config, args):
             output, aggregate_loss, detect_loss, mi_loss = model(batch)
             criterion = nn.CrossEntropyLoss()
             loss = criterion(output, batch.y)
-            loss += aggregate_loss + detect_loss + mi_loss
-            # loss += aggregate_loss + mi_loss
+            loss += (aggregate_loss + detect_loss + mi_loss)
             loss = loss / gradient_accumulation_steps
             # We keep track of the loss at each epoch
             if args.with_tracking:
@@ -330,8 +329,8 @@ def training_function(config, args):
                 step_count += 1
 
             accuracy = accuracy_metric.compute()
-            precision = precision_metric.compute()
-            recall = recall_metric.compute()
+            precision = precision_metric.compute(zero_division=1)
+            recall = recall_metric.compute(zero_division=1)
             f1 = f1_metric.compute()
             # Use accelerator.print to print only on the main process.
             
@@ -427,7 +426,7 @@ def main():
     )
     args = parser.parse_args()
     print("args:", args)
-    config = {"lr": 2e-5, "num_epochs": 100, "seed": 42, "batch_size": 16}
+    config = {"lr": 1e-5, "num_epochs": 100, "seed": 42, "batch_size": 16}
     training_function(config, args)
 
 
