@@ -5,6 +5,8 @@ import torch.nn.functional as F
 import numpy as np
 from torch_geometric.nn import GATConv, global_mean_pool
 from torch_geometric.utils import to_dense_adj
+import time
+import pdb
 
 class GIBModel(torch.nn.Module):
     def __init__(self):
@@ -27,10 +29,11 @@ class GIBModel(torch.nn.Module):
         # TODO: sampling process and loss
         node_x, edge_index, batch = graph_data.x, graph_data.edge_index, graph_data.batch
         x = self.gnn(node_x, edge_index)
-        
+             
         subgraph_clf = F.softmax(self.subgraph_clf_layer(x), dim=1)
         
         graph_embeddings, subgraph_embeddings, aggregate_loss = self.aggregate(x, edge_index, batch, subgraph_clf)
+        mi_loss = self.mutual_information_estimation(graph_embeddings, subgraph_embeddings)
 
         # node_sig = self.determine_subgraph(node_x, edge_index, batch)
         # detect_loss = torch.mean(torch.abs(subgraph_clf[:, 0] - node_sig[:, 0]))
@@ -39,7 +42,7 @@ class GIBModel(torch.nn.Module):
         output = F.relu(self.fc1(subgraph_embeddings))
         output = F.dropout(output, p=0.3, training=self.training)
         output = self.fc2(output)
-        return output, aggregate_loss, detect_loss
+        return output, aggregate_loss, detect_loss, mi_loss
         
 
     
@@ -82,6 +85,17 @@ class GIBModel(torch.nn.Module):
         total_loss = total_loss / len(graph_ids)
         
         return graph_embeddings, subgraph_embeddings, total_loss
+
+
+    def mutual_information_estimation(self, graph_embeddings, subgraph_embeddings):
+        shuffle_embeddings = graph_embeddings[torch.randperm(graph_embeddings.shape[0])]
+        joint_embeddings = torch.cat([graph_embeddings, subgraph_embeddings], dim=-1)
+        margin_embeddings = torch.cat([shuffle_embeddings, subgraph_embeddings], dim=-1)
+        joint = F.relu(self.ib_estimator_layer2(F.relu(self.ib_estimator_layer1(joint_embeddings))))
+        margin = F.relu(self.ib_estimator_layer2(F.relu(self.ib_estimator_layer1(margin_embeddings))))
+        mi_est = torch.clamp(torch.log(torch.clamp(torch.mean(torch.exp(margin)),1,1e+25)),-100000,100000) - torch.mean(joint)
+        return mi_est
+
     
     def determine_subgraph(self, x, edge_index, batch):
         # return node_sig: node_num * 2, one-hot flag of node significance
@@ -111,12 +125,12 @@ class GIBModel(torch.nn.Module):
         graph_ids = torch.unique(batch)
         
         for graph_idx in graph_ids:
+            start_time = time.time()
             mask = (batch == graph_idx)
-            mask_idx = [i for i, x in enumerate(mask) if x == True]
+            mask_idx = torch.nonzero(mask).squeeze().tolist()
 
             # build one graph for each node
-            for x_idx in range(len(mask_idx)):
-                node_global_idx = mask_idx[x_idx]
+            for node_global_idx in mask_idx:
                 neighbor_edges = []
                 subgraph_embeddings = torch.zeros(x.size())
                 if torch.cuda.is_available():
@@ -155,5 +169,6 @@ class GIBModel(torch.nn.Module):
                 
                 x_embedding = self.gnn(subgraph_embeddings, neighbor_edges)
                 node_embeddings[node_global_idx] = x_embedding[node_global_idx]
+            print("time(seconds):", time.time() - start_time)
 
         return node_embeddings

@@ -280,10 +280,10 @@ def training_function(config, args):
         for step, batch in enumerate(active_dataloader):
             # We could avoid this line since we set the accelerator with `device_placement=True`.
             batch.to(accelerator.device)
-            output, ib_loss, detect_loss = model(batch)
+            output, aggregate_loss, detect_loss, mi_loss = model(batch)
             criterion = nn.CrossEntropyLoss()
             loss = criterion(output, batch.y)
-            loss += ib_loss + detect_loss
+            loss += (aggregate_loss + detect_loss + mi_loss)
             loss = loss / gradient_accumulation_steps
             # We keep track of the loss at each epoch
             if args.with_tracking:
@@ -309,7 +309,7 @@ def training_function(config, args):
                 # We could avoid this line since we set the accelerator with `device_placement=True`.
                 batch.to(accelerator.device)
                 with torch.no_grad():
-                    output, ib_loss, detect_loss = model(batch)
+                    output, aggregate_loss, detect_loss, mi_loss = model(batch)
                 predictions = output.argmax(dim=-1)
                 predictions, references = accelerator.gather_for_metrics(
                     (predictions, batch.y)
@@ -416,7 +416,7 @@ def main():
     )
     args = parser.parse_args()
     print("args:", args)
-    config = {"lr": 2e-5, "num_epochs": 100, "seed": 42, "batch_size": 16}
+    config = {"lr": 1e-5, "num_epochs": 100, "seed": 42, "batch_size": 16}
     training_function(config, args)
 
 
