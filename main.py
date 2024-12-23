@@ -43,6 +43,7 @@ from transformers import (
 from accelerate import Accelerator, DataLoaderConfiguration, DistributedType
 
 from models.GIB_model import GIBModel
+from utils.data_loader import FakeNewsNetDataset
 
 ########################################################################
 # This is a fully working simple example to use Accelerate
@@ -124,10 +125,19 @@ def training_function(config, args):
     #     test_dataset, shuffle=False, batch_size=EVAL_BATCH_SIZE
     # )
     
-    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', 'data', 'UPFD')
-    val_dataset = UPFD(path, args.dataset, args.feature, 'train', ToUndirected())
-    test_dataset = UPFD(path, args.dataset, args.feature, 'val', ToUndirected())
-    train_dataset = UPFD(path, args.dataset, args.feature, 'test', ToUndirected())
+    # path = os.path.join(os.path.dirname(os.path.realpath(__file__)), '..', 'data', 'UPFD')
+    # val_dataset = UPFD(path, args.dataset, args.feature, 'train', ToUndirected())
+    # test_dataset = UPFD(path, args.dataset, args.feature, 'val', ToUndirected())
+    # train_dataset = UPFD(path, args.dataset, args.feature, 'test', ToUndirected())
+
+    # train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    # val_loader = DataLoader(val_dataset, batch_size=EVAL_BATCH_SIZE, shuffle=False)
+    # test_loader = DataLoader(test_dataset, batch_size=EVAL_BATCH_SIZE, shuffle=False)
+    
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'data')
+    train_dataset = FakeNewsNetDataset(path, args.dataset, args.feature, 'train')
+    val_dataset = FakeNewsNetDataset(path, args.dataset, args.feature, 'val')
+    test_dataset = FakeNewsNetDataset(path, args.dataset, args.feature, 'test')
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=EVAL_BATCH_SIZE, shuffle=False)
