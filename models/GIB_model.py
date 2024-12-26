@@ -12,37 +12,80 @@ class GIBModel(torch.nn.Module):
     def __init__(self):
         super(GIBModel, self).__init__()
         self.n_features = 768
-        self.n_hidden = 128
+        self.n_hidden = 256
         self.n_classes = 2
         self.n_heads = 4
+        self.n_subgraphs = 10
+        
         self.conv1 = GATConv(self.n_features, self.n_hidden, heads=self.n_heads, dropout=0.2)
         self.conv2 = GATConv(self.n_hidden * self.n_heads, self.n_hidden, dropout=0.2)
         self.subgraph_clf_layer = nn.Linear(self.n_hidden, 2)
+        self.subgraph_clf_layers = nn.ModuleList([
+            nn.Linear(self.n_hidden, 2) for _ in range(self.n_subgraphs)
+        ])
         self.subgraph_detect_layer = nn.Linear(self.n_hidden, 2)    # mask select
         self.fc1 = nn.Linear(self.n_hidden, self.n_hidden)
         self.fc2 = nn.Linear(self.n_hidden, self.n_classes)
         self.mse_loss = nn.MSELoss()
         self.ib_estimator_layer1 = nn.Linear(self.n_hidden * 2, self.n_hidden)
         self.ib_estimator_layer2 = nn.Linear(self.n_hidden, 1)
+        self.batch_norm1 = nn.BatchNorm1d(self.n_hidden)
+        self.batch_norm2 = nn.BatchNorm1d(1)
+        
 
     def forward(self, graph_data):
-        # TODO: sampling process and loss
         node_x, edge_index, batch = graph_data.x, graph_data.edge_index, graph_data.batch
         x = self.gnn(node_x, edge_index)
-             
-        subgraph_clf = F.softmax(self.subgraph_clf_layer(x), dim=1)
         
-        graph_embeddings, subgraph_embeddings, aggregate_loss = self.aggregate(x, edge_index, batch, subgraph_clf)
-        mi_loss = self.mutual_information_estimation(graph_embeddings, subgraph_embeddings)
+        # subgraph_clf = F.softmax(self.subgraph_clf_layer(x), dim=1)
+        # graph_embeddings, subgraph_embeddings, aggregate_loss = self.aggregate(x, edge_index, batch, subgraph_clf)
+        # mi_loss = self.mutual_information_estimation(graph_embeddings, subgraph_embeddings)
+        
+        subgraph_clfs = [
+            F.softmax(clf_layer(x), dim=1)
+            for clf_layer in self.subgraph_clf_layers
+        ]
+        
+        graph_embeddings_list = []
+        subgraph_embeddings_list = []
+        aggregate_losses = []
+        mi_losses = []
+        
+        for subgraph_clf in subgraph_clfs:
+            g_emb, s_emb, agg_loss = self.aggregate(x, edge_index, batch, subgraph_clf)
+            graph_embeddings_list.append(g_emb)
+            subgraph_embeddings_list.append(s_emb)
+            aggregate_losses.append(agg_loss)
 
-        # node_sig = self.determine_subgraph(node_x, edge_index, batch)
-        # detect_loss = torch.mean(torch.abs(subgraph_clf[:, 0] - node_sig[:, 0]))
-        detect_loss = 0
-
+            mi_loss = self.mutual_information_estimation(g_emb, s_emb)
+            mi_losses.append(mi_loss)
+        
+        diversity_loss = 0
+        n_pairs = 0
+        for i in range(len(subgraph_embeddings_list)):
+            for j in range(i + 1, len(subgraph_embeddings_list)):
+                # TODO: DPP?
+                sim = F.cosine_similarity(
+                    subgraph_embeddings_list[i],
+                    subgraph_embeddings_list[j],
+                    dim=1
+                ).mean()
+                diversity_loss += sim
+                n_pairs += 1
+        
+        diversity_loss = diversity_loss / n_pairs
+        
+        min_mi_idx = torch.argmin(torch.tensor(mi_losses))
+        
+        subgraph_embeddings = subgraph_embeddings_list[min_mi_idx]
+        aggregate_loss = aggregate_losses[min_mi_idx]
+        mi_loss = mi_losses[min_mi_idx]
+                
         output = F.relu(self.fc1(subgraph_embeddings))
         output = F.dropout(output, p=0.3, training=self.training)
         output = self.fc2(output)
-        return output, aggregate_loss, detect_loss, mi_loss
+        
+        return output, aggregate_loss + diversity_loss + mi_loss
         
 
     
@@ -91,8 +134,8 @@ class GIBModel(torch.nn.Module):
         shuffle_embeddings = graph_embeddings[torch.randperm(graph_embeddings.shape[0])]
         joint_embeddings = torch.cat([graph_embeddings, subgraph_embeddings], dim=-1)
         margin_embeddings = torch.cat([shuffle_embeddings, subgraph_embeddings], dim=-1)
-        joint = F.relu(self.ib_estimator_layer2(F.relu(self.ib_estimator_layer1(joint_embeddings))))
-        margin = F.relu(self.ib_estimator_layer2(F.relu(self.ib_estimator_layer1(margin_embeddings))))
+        joint = self.estimator(joint_embeddings)
+        margin = self.estimator(margin_embeddings)
         mi_est = torch.clamp(torch.log(torch.clamp(torch.mean(torch.exp(margin)),1,1e+25)),-100000,100000) - torch.mean(joint)
         return mi_est
 
@@ -114,6 +157,14 @@ class GIBModel(torch.nn.Module):
         x = F.relu(self.conv1(x, edge_index))
         x = F.relu(self.conv2(x, edge_index))
         return x
+
+    def estimator(self, x):
+        x = F.relu(self.ib_estimator_layer1(x))
+        x = self.batch_norm1(x)
+        x = F.relu(self.ib_estimator_layer2(x))
+        x = self.batch_norm2(x)
+        return x
+        
     
     def aggregate_by_hop(self, x, edge_index, batch, hop):
         # aggregate heighbor embeddings based on hop 
