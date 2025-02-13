@@ -21,6 +21,7 @@ from tqdm import tqdm
 import evaluate
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from datasets import load_dataset
 from torch.optim import AdamW
 from torch.utils.data import random_split
@@ -64,7 +65,7 @@ from utils.data_loader import FakeNewsNetDataset
 ########################################################################
 
 MAX_GPU_BATCH_SIZE = 64
-EVAL_BATCH_SIZE = 16
+EVAL_BATCH_SIZE = 64
 
 
 def training_function(config, args):
@@ -137,7 +138,7 @@ def training_function(config, args):
     path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'data')
     train_dataset = FakeNewsNetDataset(path, args.dataset, args.feature, 'train')
     val_dataset = FakeNewsNetDataset(path, args.dataset, args.feature, 'val')
-    test_dataset = FakeNewsNetDataset(path, args.dataset, args.feature, 'test')
+    test_dataset = FakeNewsNetDataset(path, args.dataset, args.feature, 'test', ratio=args.ratio)
 
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_dataset, batch_size=EVAL_BATCH_SIZE, shuffle=False)
@@ -294,6 +295,9 @@ def training_function(config, args):
             criterion = nn.CrossEntropyLoss()
             loss = criterion(output, batch.y)
             loss += mi_loss
+            if torch.isnan(loss):
+                accelerator.print("Warning: Loss is NaN. Skipping this step.")
+                continue
             loss = loss / gradient_accumulation_steps
             # We keep track of the loss at each epoch
             if args.with_tracking:
@@ -319,8 +323,8 @@ def training_function(config, args):
                 # We could avoid this line since we set the accelerator with `device_placement=True`.
                 batch.to(accelerator.device)
                 with torch.no_grad():
-                    output, loss = model(batch)
-                predictions = output.argmax(dim=-1)
+                    output, _ = model(batch)
+                predictions = torch.sigmoid(output).argmax(dim=-1)
                 predictions, references = accelerator.gather_for_metrics(
                     (predictions, batch.y)
                 )
@@ -335,7 +339,7 @@ def training_function(config, args):
             f1 = f1_metric.compute()
             # Use accelerator.print to print only on the main process.
             
-            accelerator.print(f"{type} set:", f"epoch {epoch}:", f"accuracy: {accuracy}", f"precision: {precision}", f"recall: {recall}", f"f1: {f1}")
+            accelerator.print(f"{type} set:", f"epoch {epoch}:", f"accuracy: {accuracy}", f"precision: {precision}", f"recall: {recall}", f"f1: {f1}", f"loss: {loss}")
             if args.with_tracking:
                 accelerator.log(
                     {
@@ -424,9 +428,16 @@ def main():
         choices=["profile", "spacy", "bert", "content"],
         help="The feature to use for training and evaluation.",
     )
+    parser.add_argument(
+        "--ratio",
+        type=float,
+        default=1.0,
+        choices=[0.2, 0.5, 0.8, 1.0],
+        help="The ratio of test set.",
+    )
     args = parser.parse_args()
     print("args:", args)
-    config = {"lr": 1e-5, "num_epochs": 100, "seed": 42, "batch_size": 16}
+    config = {"lr": 1e-4, "num_epochs": 100, "seed": 42, "batch_size": 64}
     training_function(config, args)
 
 
