@@ -365,6 +365,236 @@ def training_function(config, args):
 
     accelerator.end_training()
 
+def training_function_cl(config, args):
+    # Initialize accelerator
+    dataloader_config = DataLoaderConfiguration()
+    if args.with_tracking:
+        accelerator = Accelerator(
+            cpu=args.cpu,
+            mixed_precision=args.mixed_precision,
+            dataloader_config=dataloader_config,
+            log_with="all",
+            project_dir=args.project_dir,
+        )
+    else:
+        accelerator = Accelerator(
+            cpu=args.cpu,
+            mixed_precision=args.mixed_precision,
+            dataloader_config=dataloader_config,
+        )
+
+    if hasattr(args.checkpointing_steps, "isdigit"):
+        if args.checkpointing_steps == "epoch":
+            checkpointing_steps = args.checkpointing_steps
+        elif args.checkpointing_steps.isdigit():
+            checkpointing_steps = int(args.checkpointing_steps)
+        else:
+            raise ValueError(
+                f"Argument `checkpointing_steps` must be either a number or `epoch`. `{args.checkpointing_steps}` passed."
+            )
+    else:
+        checkpointing_steps = None
+    # Sample hyper-parameters for learning rate, batch size, seed and a few other HPs
+    lr = config["lr"]
+    num_epochs = int(config["num_epochs"])
+    seed = int(config["seed"])
+    batch_size = int(config["batch_size"])
+
+    # We need to initialize the trackers we use, and also store our configuration
+    if args.with_tracking:
+        run = os.path.split(__file__)[-1].split(".")[0]
+        accelerator.init_trackers(run, config)
+
+    tokenizer = AutoTokenizer.from_pretrained("bert-base-cased")
+    
+    # Define curriculum stages
+    curriculum_ratios = [1.0, 0.8, 0.5, 0.2]  # From easy to hard
+    curriculum_epochs = num_epochs // len(curriculum_ratios)  # Epochs per curriculum stage
+    
+    # Prepare datasets that don't change with curriculum
+    path = os.path.join(os.path.dirname(os.path.realpath(__file__)), 'data')
+    val_dataset = FakeNewsNetDataset(path, args.dataset, args.feature, 'val', ratio=args.ratio)
+    test_dataset = FakeNewsNetDataset(path, args.dataset, args.feature, 'test', ratio=args.ratio)
+    val_loader = DataLoader(val_dataset, batch_size=EVAL_BATCH_SIZE, shuffle=False)
+    test_loader = DataLoader(test_dataset, batch_size=EVAL_BATCH_SIZE, shuffle=False)
+
+    # Model and optimizer setup
+    gradient_accumulation_steps = 1
+    if (
+        batch_size > MAX_GPU_BATCH_SIZE
+        and accelerator.distributed_type != DistributedType.XLA
+    ):
+        gradient_accumulation_steps = batch_size // MAX_GPU_BATCH_SIZE
+        batch_size = MAX_GPU_BATCH_SIZE
+
+    # Instantiate dataloaders.
+    # train_loader = DataLoader(
+    #     train_dataset, shuffle=True, collate_fn=collate_fn, batch_size=batch_size
+    # )
+    # val_loader = DataLoader(
+    #     val_dataset, shuffle=False, collate_fn=collate_fn, batch_size=EVAL_BATCH_SIZE
+    # )
+    
+    set_seed(seed)
+
+    # Instantiate the model (we build the model here so that the seed also control new weights initialization)
+    # model = AutoModelForSequenceClassification.from_pretrained(
+    #     "bert-base-cased", return_dict=True
+    # )
+    model = GIBModel()
+
+    # We could avoid this line since the accelerator is set with `device_placement=True` (default value).
+    # Note that if you are placing tensors on devices manually, this line absolutely needs to be before the optimizer
+    # creation otherwise training will not work on TPU (`accelerate` will kindly throw an error to make us aware of that).
+    model = model.to(accelerator.device)
+
+    # Instantiate optimizer
+    optimizer = AdamW(params=model.parameters(), lr=lr)
+
+    # Load checkpoint if resuming training
+    if args.resume_from_checkpoint:
+        checkpoint = torch.load(args.resume_from_checkpoint)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        starting_epoch = checkpoint['epoch']
+        current_curriculum_stage = checkpoint['curriculum_stage']
+    else:
+        starting_epoch = 0
+        current_curriculum_stage = 0
+
+    best_val_f1 = 0.0
+    
+    # Curriculum Learning loop
+    for curriculum_stage in range(current_curriculum_stage, len(curriculum_ratios)):
+        ratio = curriculum_ratios[curriculum_stage]
+        accelerator.print(f"\nStarting curriculum stage {curriculum_stage + 1}/{len(curriculum_ratios)} with ratio {ratio}")
+        
+        # Load training data for current curriculum stage
+        train_dataset = FakeNewsNetDataset(path, args.dataset, args.feature, 'train', ratio=ratio)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        
+        # Instantiate scheduler
+        lr_scheduler = get_linear_schedule_with_warmup(
+            optimizer=optimizer,
+            num_warmup_steps=100,
+            num_training_steps=(len(train_loader) * num_epochs)
+            // gradient_accumulation_steps,
+        )
+        # Prepare dataloaders with accelerator
+        model, optimizer, train_loader, val_loader, lr_scheduler = accelerator.prepare(
+            model, optimizer, train_loader, val_loader, lr_scheduler
+        )
+
+        # Training loop for current curriculum stage
+        start_epoch = starting_epoch if curriculum_stage == current_curriculum_stage else 0
+        for epoch in tqdm(range(start_epoch, curriculum_epochs), desc=f"Training (ratio={ratio})"):
+            model.train()
+            total_loss = 0
+            
+            for step, batch in enumerate(train_loader):
+                batch.to(accelerator.device)
+                output, mi_loss = model(batch)
+                criterion = nn.CrossEntropyLoss()
+                loss = criterion(output, batch.y) + mi_loss
+                
+                if torch.isnan(loss):
+                    accelerator.print("Warning: Loss is NaN. Skipping this step.")
+                    continue
+                    
+                accelerator.backward(loss)
+                optimizer.step()
+                lr_scheduler.step()
+                optimizer.zero_grad()
+                total_loss += loss.detach().float()
+
+            # Evaluate and save checkpoint
+            val_metrics = eval_model(model, val_loader, f"Validation (ratio={args.ratio})", epoch, args, accelerator)
+            test_metrics = eval_model(model, test_loader, f"Test (ratio={args.ratio})", epoch, args, accelerator)
+            
+            
+            # Save checkpoint
+            output_dir = os.path.join(args.output_dir, args.dataset)
+            if args.output_dir and (epoch + 1) % 10 == 0:
+                checkpoint_path = os.path.join(
+                    output_dir, 
+                    f"{args.dataset}_checkpoint_curriculum{curriculum_stage}_epoch{epoch}.pt"
+                )
+                accelerator.save({
+                    'epoch': epoch,
+                    'curriculum_stage': curriculum_stage,
+                    'model_state_dict': accelerator.unwrap_model(model).state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'val_f1': val_metrics['f1'],
+                    'test_f1': test_metrics['f1'],
+                }, checkpoint_path)
+                
+                # Save best model
+                if val_metrics['f1']['f1'] > best_val_f1:
+                    best_val_f1 = val_metrics['f1']['f1']
+                    accelerator.save({
+                        'model_state_dict': accelerator.unwrap_model(model).state_dict(),
+                        'val_f1': val_metrics['f1'],
+                        'test_f1': test_metrics['f1'],
+                    }, os.path.join(output_dir, f"{args.dataset}_best_model.pt"))
+
+    # Save final model
+    if args.output_dir:
+        accelerator.save({
+            'model_state_dict': accelerator.unwrap_model(model).state_dict(),
+            'val_f1': val_metrics['f1'],
+            'test_f1': test_metrics['f1'],
+        }, os.path.join(output_dir, f"{args.dataset}_final_model.pt"))
+
+    accelerator.end_training()
+
+def eval_model(model, dataloader, type, epoch, args, accelerator):
+    model.eval()
+    accuracy_metric = evaluate.load("accuracy")
+    precision_metric = evaluate.load("precision")
+    recall_metric = evaluate.load("recall")
+    f1_metric = evaluate.load("f1")
+    
+    for batch in dataloader:
+        batch.to(accelerator.device)
+        with torch.no_grad():
+            output, _ = model(batch)
+        predictions = torch.sigmoid(output).argmax(dim=-1)
+        predictions, references = accelerator.gather_for_metrics((predictions, batch.y))
+        
+        accuracy_metric.add_batch(predictions=predictions, references=references)
+        precision_metric.add_batch(predictions=predictions, references=references)
+        recall_metric.add_batch(predictions=predictions, references=references)
+        f1_metric.add_batch(predictions=predictions, references=references)
+
+    metrics = {
+        'accuracy': accuracy_metric.compute(),
+        'precision': precision_metric.compute(zero_division=1),
+        'recall': recall_metric.compute(zero_division=1),
+        'f1': f1_metric.compute()
+    }
+    
+    accelerator.print(
+        f"{type}:",
+        f"epoch {epoch}:",
+        f"accuracy: {metrics['accuracy']}",
+        f"precision: {metrics['precision']}",
+        f"recall: {metrics['recall']}",
+        f"f1: {metrics['f1']}"
+    )
+    
+    if args.with_tracking:
+        accelerator.log(
+            {
+                f"{type.lower()}_accuracy": metrics['accuracy'],
+                f"{type.lower()}_precision": metrics['precision'],
+                f"{type.lower()}_recall": metrics['recall'],
+                f"{type.lower()}_f1": metrics['f1'],
+                "epoch": epoch,
+            },
+            step=epoch,
+        )
+    
+    return metrics
 
 def main():
     parser = argparse.ArgumentParser(description="Simple example of training script.")
@@ -438,7 +668,7 @@ def main():
     args = parser.parse_args()
     print("args:", args)
     config = {"lr": 1e-4, "num_epochs": 100, "seed": 42, "batch_size": 64}
-    training_function(config, args)
+    training_function_cl(config, args)
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from typing import Callable, List, Optional
 import numpy as np
 import torch
 import math
+import pickle
 
 from torch_geometric.data import (
     Data,
@@ -48,9 +49,10 @@ class FakeNewsNetDataset(InMemoryDataset):
 
     @property
     def processed_dir(self) -> str:
-        if self.split == 'test' and self.ratio != 1.0:
-            return osp.join(self.root, self.name, 'processed', self.feature, f'ratio_{self.ratio}')
-        return osp.join(self.root, self.name, 'processed', self.feature)
+        # if self.split == 'test' and self.ratio != 1.0:
+        #     return osp.join(self.root, self.name, 'processed', self.feature, f'ratio_{self.ratio}')
+        # return osp.join(self.root, self.name, 'processed', self.feature)
+        return osp.join(self.root, self.name, 'processed', self.feature, self.split, f'ratio_{self.ratio}')
 
     @property
     def raw_file_names(self) -> List[str]:
@@ -131,6 +133,51 @@ class FakeNewsNetDataset(InMemoryDataset):
         new_edge_index = torch.tensor(new_edges).t() if new_edges else torch.empty((2, 0), dtype=torch.long)
         
         return Data(x=new_x, edge_index=new_edge_index, y=data.y)
+    
+    def _prune_sorted_nodes(self, root, data: Data) -> Data:
+        ranking_path = osp.join(self.raw_dir, f'{self.name}_user_similarity_rankings.pkl')
+        with open(ranking_path, 'rb') as f:
+            rankings = pickle.load(f)
+        
+        # Get sorted nodes starting with root
+        sorted_nodes = [0] + rankings.get(root, [])
+        
+        # Extend unvisited nodes to the end of sorted nodes
+        all_nodes = set(range(data.x.size(0)))
+        sorted_nodes_set = set(sorted_nodes)
+        remaining_nodes = list(all_nodes - sorted_nodes_set)
+        sorted_nodes.extend(remaining_nodes)
+        
+        # Calculate how many nodes to keep
+        nodes_to_keep = math.ceil(data.x.size(0) * self.ratio)
+        keep_indices = sorted_nodes[:nodes_to_keep]
+        
+        # Convert to set for O(1) lookup
+        keep_indices_set = set(keep_indices)
+        
+        # Filter edges first
+        edge_list = data.edge_index.t().tolist()
+        valid_edges = []
+        for src, dst in edge_list:
+            if src in keep_indices_set and dst in keep_indices_set:
+                valid_edges.append([src, dst])
+        
+        # Create mapping after filtering edges
+        old_to_new = {old_idx: new_idx for new_idx, old_idx in enumerate(keep_indices)}
+        
+        # Create new edge index with mapped indices
+        new_edges = [[old_to_new[src], old_to_new[dst]] for src, dst in valid_edges]
+        new_edge_index = torch.tensor(new_edges, dtype=torch.long).t() if new_edges else torch.empty((2, 0), dtype=torch.long)
+        
+        # Select nodes
+        new_x = data.x[keep_indices]
+        
+        # Verify data consistency
+        if new_edge_index.numel() > 0:  # Only check if we have edges
+            assert new_edge_index.max() < new_x.size(0), f"Edge index {new_edge_index.max()} out of bounds for {new_x.size(0)} nodes"
+            assert new_edge_index.min() >= 0, f"Negative edge index found: {new_edge_index.min()}"
+        
+        return Data(x=new_x, edge_index=new_edge_index, y=data.y)
 
     def process(self) -> None:
         import scipy.sparse as sp
@@ -169,8 +216,7 @@ class FakeNewsNetDataset(InMemoryDataset):
                 data_list = [d for d in data_list if self.pre_filter(d)]
             if self.pre_transform is not None:
                 data_list = [self.pre_transform(d) for d in data_list]
-            if split == 'test':
-                data_list = [self._prune_nodes(d) for d in data_list]
+            data_list = [self._prune_sorted_nodes(i, d) for i, d in zip(idx, data_list)]
             self.save(data_list, path)
 
     def __repr__(self) -> str:
@@ -179,4 +225,23 @@ class FakeNewsNetDataset(InMemoryDataset):
         
 if __name__ == "__main__":
     path = os.path.join(os.path.dirname(os.path.realpath(__file__)), '../data')
-    test_dataset = FakeNewsNetDataset(path, 'politifact', 'bert', split='test', ratio=0.5)
+    for split in ['train', 'val', 'test']:
+        test_dataset_1 = FakeNewsNetDataset(path, 'politifact', 'bert', split=split, ratio=1.0)
+        test_dataset_2 = FakeNewsNetDataset(path, 'politifact', 'bert', split=split, ratio=0.8)
+        test_dataset_3 = FakeNewsNetDataset(path, 'politifact', 'bert', split=split, ratio=0.5)
+        test_dataset_4 = FakeNewsNetDataset(path, 'politifact', 'bert', split=split, ratio=0.2)
+        
+        ls1 = []
+        for batch in test_dataset_1:
+            ls1.append(batch.x.shape)
+        ls2 = []
+        for batch in test_dataset_2:
+            ls2.append(batch.x.shape)
+        ls3 = []
+        for batch in test_dataset_3:
+            ls3.append(batch.x.shape)
+        ls4 = []
+        for batch in test_dataset_4:
+            ls4.append(batch.x.shape)
+        print(len(ls1), len(ls2), len(ls3), len(ls4))
+        

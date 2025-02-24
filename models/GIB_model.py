@@ -123,7 +123,7 @@ class GIBModel(torch.nn.Module):
         total_loss = 0
         node_masks = []
         
-        dense_adj = to_dense_adj(edge_index)[0]
+        # dense_adj = to_dense_adj(edge_index)[0]
         
         graph_ids = torch.unique(batch)
         
@@ -132,7 +132,7 @@ class GIBModel(torch.nn.Module):
             
             init_x = x[mask]
             graph_x = x_emb[mask]
-            graph_adj = dense_adj[mask][:, mask]
+            # graph_adj = dense_adj[mask][:, mask]
             graph_subgraph_clf = subgraph_clf[mask]
             
             # current method
@@ -187,6 +187,8 @@ class GIBModel(torch.nn.Module):
             # collect masks from all classifiers
             # Stack masks for current graph: n_subgraphs x n_nodes
             graph_masks = torch.stack([masks[graph_idx] for masks in all_node_masks])
+            if graph_masks.ndimension() == 1:
+                graph_masks = graph_masks.unsqueeze(1)
             
             # Coverage term: encourage complete coverage of graph
             coverage = torch.mean(torch.max(graph_masks, dim=0)[0])

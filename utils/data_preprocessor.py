@@ -208,14 +208,29 @@ def process(dataset):
     
     # with open(f'utils/tmp/{dataset}_user_similarity_rankings.pkl', 'wb') as f:
     #     pickle.dump(user_similarity_rankings, f)
+    
+    # 4. Process bias
+    # with open(f'utils/tmp/{dataset}_user_similarity_rankings.pkl', 'rb') as f:
+    #     user_similarity_rankings = pickle.load(f)
+    
+    # root_list = list(graphs.keys())
         
-    with open(f'utils/tmp/{dataset}_user_similarity_rankings.pkl', 'rb') as f:
-        user_similarity_rankings = pickle.load(f)
+    # new_user_similarity_rankings = {}
+    # for i, root in enumerate(root_list):
+    #     if root in user_similarity_rankings:
+    #         new_user_similarity_rankings[i] = user_similarity_rankings[root]
+    
+    # with open(f'utils/tmp/{dataset}_user_similarity_rankings_1.pkl', 'wb') as f:
+    #     pickle.dump(new_user_similarity_rankings, f)
+        
+    with open(f'utils/tmp/{dataset}_user_similarity_rankings_1.pkl', 'rb') as f:
+        new_user_similarity_rankings = pickle.load(f)
+    print(len(new_user_similarity_rankings.keys()))
     
 
 if __name__ == "__main__":
-    dataset = 'politifact'
-    # dataset = 'gossipcop'
+    # dataset = 'politifact'
+    dataset = 'gossipcop'
     process(dataset)
     # extract_tweets(dataset)
     
