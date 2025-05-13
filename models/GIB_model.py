@@ -209,8 +209,6 @@ class GIBModel(torch.nn.Module):
         return x
 
     def estimator(self, x):
-        x = F.relu(self.ib_estimator_layer1(x))
-        x = self.batch_norm1(x)
-        x = F.relu(self.ib_estimator_layer2(x))
-        x = self.batch_norm2(x)
+        x = F.relu(self.batch_norm1(self.ib_estimator_layer1(x)))
+        x = F.relu(self.batch_norm2(self.ib_estimator_layer2(x)))
         return x

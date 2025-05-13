@@ -1,8 +1,7 @@
 data/
-test.py
-data_loader_PSGT.py
 __pycache__/
 tmp/
 .ipynb_checkpoints/
 *.pt
+test.py
 train.py
